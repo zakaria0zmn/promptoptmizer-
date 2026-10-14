@@ -1,3 +1,6 @@
 dist/
 build/
 *.spec
+__pycache__/
+optimizer_config.json
+optimized_support_triage.json
