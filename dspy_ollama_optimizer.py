@@ -5,9 +5,8 @@ Target Version: DSPy v2.5+ / v2.6+
 For legacy DSPy (< v2.5), see comments in Section 2 for dspy.OllamaLocal syntax.
 """
 
-import os
 import re
-import json
+
 import dspy
 from dspy.evaluate import Evaluate
 from dspy.teleprompt import BootstrapFewShot

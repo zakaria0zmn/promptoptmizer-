@@ -3,7 +3,7 @@ Floating Local Prompt Optimizer
 Save as: D:\\vscodeworkspace\\promptoptmizer\\floating_optimizer.py
 
 Requires:
-    pip install dspy-ai
+    pip install -r requirements.txt
 
 Talks to:
     - Ollama (http://localhost:11434) for model discovery + inference via DSPy
@@ -11,6 +11,7 @@ Talks to:
 """
 
 import copy
+import ctypes
 import json
 import os
 import re
@@ -18,12 +19,13 @@ import shutil
 import subprocess
 import threading
 import time
-import urllib.request
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+import urllib.request
 from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 import dspy
+from PIL import Image, ImageDraw, ImageTk
 
 # ==============================================================================
 # Paths / Config
@@ -34,6 +36,8 @@ CONFIG_PATH = SCRIPT_DIR / "optimizer_config.json"
 OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen2.5-7b:latest"
 MAX_HISTORY = 25
+MAX_MODEL_DISPLAY_LENGTH = 22
+MAX_PRESET_DISPLAY_LENGTH = 24
 
 GOOSE_REPORT_TRAILER = (
     "\n\nWhen finished (or if you stop early), report back:\n"
@@ -60,21 +64,21 @@ def load_config() -> dict:
     if not CONFIG_PATH.exists():
         return copy.deepcopy(DEFAULT_CONFIG)
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        with CONFIG_PATH.open(encoding="utf-8") as f:
             data = json.load(f)
     except json.JSONDecodeError as error:
         raise ValueError(f"Invalid JSON in {CONFIG_PATH}: {error}") from error
     except OSError as error:
         raise OSError(f"Could not read {CONFIG_PATH}: {error}") from error
     if not isinstance(data, dict):
-        raise ValueError(f"Expected a JSON object in {CONFIG_PATH}.")
+        raise TypeError(f"Expected a JSON object in {CONFIG_PATH}.")
     cfg = copy.deepcopy(DEFAULT_CONFIG)
     cfg.update(data)
     return cfg
 
 
 def save_config(cfg: dict) -> None:
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+    with CONFIG_PATH.open("w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
 
@@ -260,6 +264,7 @@ def _hover(
     widget,
     normal_bg,
     hover_bg,
+    *,
     normal_fg=None,
     hover_fg=None,
     normal_border=None,
@@ -330,6 +335,197 @@ class ToolTip:
             self.window = None
 
 
+class CanvasSpinner:
+    """A compact arc spinner drawn directly on a Tkinter canvas."""
+
+    def __init__(self, parent, *, size=14, bg=BG0, color=RED, track_color=BORDER, speed_ms=25):
+        self.size = size
+        self.color = color
+        self.track_color = track_color
+        self.speed_ms = speed_ms
+        self.canvas = tk.Canvas(parent, width=size, height=size, bg=bg, highlightthickness=0)
+        self.angle = 0
+        self.is_running = False
+        self._after_id = None
+
+    def start(self):
+        if self.is_running:
+            return
+        self.is_running = True
+        self.canvas.pack(side=tk.LEFT, padx=(0, 6))
+        self._animate()
+
+    def stop(self):
+        self.is_running = False
+        if self._after_id is not None:
+            self.canvas.after_cancel(self._after_id)
+            self._after_id = None
+        self.canvas.pack_forget()
+        self.canvas.delete("all")
+
+    def _animate(self):
+        if not self.is_running or not self.canvas.winfo_exists():
+            return
+
+        pad = 2
+        bounds = (pad, pad, self.size - pad, self.size - pad)
+        self.canvas.delete("all")
+        self.canvas.create_oval(*bounds, outline=self.track_color, width=2)
+        self.canvas.create_arc(
+            *bounds,
+            start=self.angle,
+            extent=90,
+            outline=self.color,
+            style=tk.ARC,
+            width=2,
+        )
+        self.angle = (self.angle + 12) % 360
+        self._after_id = self.canvas.after(self.speed_ms, self._animate)
+
+
+def render_signal_focus_logo(target_size: int = 24, scale: int = 4) -> Image.Image:
+    """Render the Signal Focus logo with supersampled anti-aliasing."""
+    if target_size <= 0 or scale <= 0:
+        raise ValueError("target_size and scale must be positive integers.")
+
+    raw = target_size * scale
+    image = Image.new("RGBA", (raw, raw), (7, 7, 7, 0))
+    draw = ImageDraw.Draw(image)
+
+    pad = int(scale)
+    draw.rounded_rectangle(
+        (pad, pad, raw - pad, raw - pad),
+        radius=int(target_size * 0.22 * scale),
+        fill=(14, 14, 16, 255),
+        outline=(42, 42, 46, 255),
+        width=max(1, int(0.8 * scale)),
+    )
+
+    def point(x: float, y: float) -> tuple[int, int]:
+        return int(x * raw / 100.0), int(y * raw / 100.0)
+
+    bars = [
+        (15, 25, 42, 34, (140, 140, 150, 255)),
+        (15, 45, 48, 55, (185, 185, 195, 255)),
+        (15, 66, 38, 75, (140, 140, 150, 255)),
+    ]
+    for x1, y1, x2, y2, color in bars:
+        draw.rounded_rectangle(
+            (*point(x1, y1), *point(x2, y2)),
+            radius=int(2 * scale),
+            fill=color,
+        )
+
+    crimson = (232, 39, 60, 255)
+    funnel_width = max(2, int(target_size * 0.085 * scale))
+    funnel_points = [point(44, 18), point(62, 38), point(62, 62), point(44, 82)]
+    draw.line(funnel_points, fill=crimson, width=funnel_width, joint="curve")
+    cap_radius = funnel_width // 2
+    for center_x, center_y in (point(44, 18), point(44, 82)):
+        draw.ellipse(
+            (
+                center_x - cap_radius,
+                center_y - cap_radius,
+                center_x + cap_radius,
+                center_y + cap_radius,
+            ),
+            fill=crimson,
+        )
+
+    draw.rectangle((*point(62, 44), *point(83, 56)), fill=crimson)
+
+    arrow_width = max(2, int(target_size * 0.085 * scale))
+    arrow_points = [point(73, 31), point(89, 50), point(73, 69)]
+    arrow_color = (242, 242, 242, 255)
+    draw.line(arrow_points, fill=arrow_color, width=arrow_width, joint="curve")
+    arrow_radius = arrow_width // 2
+    for center_x, center_y in arrow_points:
+        draw.ellipse(
+            (
+                center_x - arrow_radius,
+                center_y - arrow_radius,
+                center_x + arrow_radius,
+                center_y + arrow_radius,
+            ),
+            fill=arrow_color,
+        )
+
+    return image.resize((target_size, target_size), Image.Resampling.LANCZOS)
+
+
+class StatusSpinner:
+    """Show a status dot or animate it as an optimization spinner."""
+
+    def __init__(self, parent, size: int = 14, bg: str = BG1):
+        self.size = size
+        self.canvas = tk.Canvas(parent, width=size, height=size, bg=bg, highlightthickness=0)
+        self.angle = 0
+        self.running = False
+        self.after_id = None
+        self.state_color = AMBER
+        self._draw_dot()
+
+    def pack(self, **kwargs):
+        self.canvas.pack(**kwargs)
+
+    def set_status_color(self, color: str):
+        self.state_color = color
+        if not self.running:
+            self._draw_dot()
+
+    def _draw_dot(self):
+        self.canvas.delete("all")
+        pad = 3
+        self.canvas.create_oval(
+            pad,
+            pad,
+            self.size - pad,
+            self.size - pad,
+            fill=self.state_color,
+            outline="",
+        )
+
+    def start(self):
+        if self.running:
+            return
+        self.running = True
+        self._step()
+
+    def stop(self):
+        self.running = False
+        if self.after_id is not None:
+            self.canvas.after_cancel(self.after_id)
+            self.after_id = None
+        self._draw_dot()
+
+    def _step(self):
+        if not self.running or not self.canvas.winfo_exists():
+            return
+        self.canvas.delete("all")
+        pad = 2
+        self.canvas.create_oval(
+            pad,
+            pad,
+            self.size - pad,
+            self.size - pad,
+            outline=BORDER,
+            width=2,
+        )
+        self.canvas.create_arc(
+            pad,
+            pad,
+            self.size - pad,
+            self.size - pad,
+            start=self.angle,
+            extent=110,
+            outline=RED,
+            style=tk.ARC,
+            width=2,
+        )
+        self.angle = (self.angle - 16) % 360
+        self.after_id = self.canvas.after(25, self._step)
+
+
 # ==============================================================================
 # Floating GUI Application
 # ==============================================================================
@@ -358,6 +554,16 @@ class FloatingOptimizerApp:
             self.cfg["snippets"] = {}
 
         self.root.title("PROMPT OPTIMIZER")
+        if os.name == "nt":
+            result = ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "zakarya.promptoptimizer.1"
+            )
+            if result != 0:
+                raise OSError(result, "Could not set the Windows taskbar application ID.")
+        self._icon_64 = ImageTk.PhotoImage(render_signal_focus_logo(64))
+        self._icon_32 = ImageTk.PhotoImage(render_signal_focus_logo(32))
+        self._title_logo = ImageTk.PhotoImage(render_signal_focus_logo(22))
+        self.root.iconphoto(True, self._icon_64, self._icon_32)
         self.root.geometry(self.cfg.get("geometry", "520x680+100+100"))
         self.root.minsize(500, 620)
         self.root.configure(bg=BG0)
@@ -445,7 +651,7 @@ class FloatingOptimizerApp:
     # UI construction
     # ------------------------------------------------------------------ #
     def _build_ui(self):
-        # ---- Top bar (drag handle, status dot, pin, history, collapse) ----
+        # ---- Top bar (drag handle, status indicator, pin, history, collapse) ----
         top_bar = tk.Frame(self.root, bg=BG1, padx=10, pady=8,
                             highlightbackground=BORDER, highlightthickness=1)
         top_bar.pack(fill=tk.X)
@@ -453,21 +659,26 @@ class FloatingOptimizerApp:
         top_bar.bind("<B1-Motion>", self._do_move)
 
         title_wrap = tk.Frame(top_bar, bg=BG1, cursor="fleur")
-        title_wrap.pack(side=tk.LEFT)
+        title_wrap.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 12))
         title_wrap.bind("<ButtonPress-1>", self._start_move)
         title_wrap.bind("<B1-Motion>", self._do_move)
 
-        self.status_dot = tk.Canvas(title_wrap, width=10, height=10, bg=BG1, highlightthickness=0)
-        self.status_dot.pack(side=tk.LEFT, padx=(0, 8))
-        self._dot_id = self.status_dot.create_oval(1, 1, 9, 9, fill=AMBER, outline="")
+        logo_lbl = tk.Label(title_wrap, image=self._title_logo, bg=BG1, bd=0, cursor="fleur")
+        logo_lbl.pack(side=tk.LEFT, padx=(0, 8))
+        logo_lbl.bind("<ButtonPress-1>", self._start_move)
+        logo_lbl.bind("<B1-Motion>", self._do_move)
 
         title_lbl = tk.Label(
-            title_wrap, text="> PROMPT OPTIMIZER", bg=BG1, fg=RED,
-            font=("Segoe UI", 11, "bold"), cursor="fleur",
+            title_wrap, text="PROMPT OPTIMIZER", bg=BG1, fg=RED,
+            font=("Segoe UI", 10, "bold"), cursor="fleur",
         )
-        title_lbl.pack(side=tk.LEFT)
+        title_lbl.pack(side=tk.LEFT, padx=(0, 8))
         title_lbl.bind("<ButtonPress-1>", self._start_move)
         title_lbl.bind("<B1-Motion>", self._do_move)
+
+        self.status_indicator = StatusSpinner(title_wrap, size=14, bg=BG1)
+        self.status_indicator.pack(side=tk.LEFT)
+        ToolTip(self.status_indicator.canvas, "Connection and optimization status indicator.")
 
         btn_cluster = tk.Frame(top_bar, bg=BG1)
         btn_cluster.pack(side=tk.RIGHT)
@@ -480,7 +691,7 @@ class FloatingOptimizerApp:
 
         self.topmost_var = tk.BooleanVar(value=self.cfg.get("topmost", True))
         self.pin_btn = self._mk_icon_btn(
-            window_controls, "📌", self.toggle_topmost, width=3
+            window_controls, "Pin", self.toggle_topmost, width=3
         )
         self.pin_btn.pack(side=tk.RIGHT, padx=(6, 0))
         self._update_pin_button()
@@ -497,11 +708,11 @@ class FloatingOptimizerApp:
         self.help_btn.pack(side=tk.RIGHT, padx=(6, 0))
         ToolTip(self.help_btn, "Show keyboard shortcuts and quick usage guidance.")
 
-        self.history_btn = self._mk_icon_btn(app_tools, "🕘", self.show_history)
+        self.history_btn = self._mk_icon_btn(app_tools, "History", self.show_history)
         self.history_btn.pack(side=tk.RIGHT, padx=(6, 0))
         ToolTip(self.history_btn, "Browse and restore one of the recent prompt optimizations.")
 
-        self.bridge_btn = self._mk_icon_btn(app_tools, "🌉 Bridge", self.open_bridge_dialog)
+        self.bridge_btn = self._mk_icon_btn(app_tools, "Bridge", self.open_bridge_dialog)
         self.bridge_btn.pack(side=tk.RIGHT, padx=(6, 0))
         ToolTip(self.bridge_btn, "Open the separate tool that distills analysis into Goose task steps.")
 
@@ -653,7 +864,7 @@ class FloatingOptimizerApp:
         out_header = tk.Frame(self.body, bg=BG0)
         out_header.pack(fill=tk.X, pady=(0, 2))
         self._mk_label(out_header, "OPTIMIZED PROMPT  ·  EDITABLE").pack(side=tk.LEFT)
-        pipe_btn = self._mk_icon_btn(out_header, "⬆ To Input", self.pipe_output_to_input)
+        pipe_btn = self._mk_icon_btn(out_header, "To Input", self.pipe_output_to_input)
         pipe_btn.pack(side=tk.RIGHT)
         ToolTip(pipe_btn, "Copy the current output into the prompt input so you can run another pass.")
 
@@ -691,12 +902,14 @@ class FloatingOptimizerApp:
         ToolTip(self.clear_out_btn, "Clear the optimized prompt output.")
 
         # Status bar
+        status_frame = tk.Frame(self.body, bg=BG0)
+        status_frame.pack(fill=tk.X, pady=(6, 0))
         self.status_var = tk.StringVar(value="Ready.")
         status_lbl = tk.Label(
-            self.body, textvariable=self.status_var, bg=BG0, fg=FG_DIM,
+            status_frame, textvariable=self.status_var, bg=BG0, fg=FG_DIM,
             font=("Segoe UI", 8), anchor="w",
         )
-        status_lbl.pack(fill=tk.X, pady=(6, 0))
+        status_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self._update_settings_summary()
 
     # ------------------------------------------------------------------ #
@@ -757,10 +970,10 @@ class FloatingOptimizerApp:
             b,
             style["background"],
             style["hover_background"],
-            style["foreground"],
-            style["hover_foreground"],
-            style["border"],
-            DANGER_BORDER if role == "danger" else style["border"],
+            normal_fg=style["foreground"],
+            hover_fg=style["hover_foreground"],
+            normal_border=style["border"],
+            hover_border=DANGER_BORDER if role == "danger" else style["border"],
         )
         return b
 
@@ -776,9 +989,9 @@ class FloatingOptimizerApp:
         if hasattr(self, "settings_summary_lbl"):
             model = self.model_var.get()
             preset = self.preset_var.get()
-            if len(model) > 22:
+            if len(model) > MAX_MODEL_DISPLAY_LENGTH:
                 model = model[:19] + "..."
-            if len(preset) > 24:
+            if len(preset) > MAX_PRESET_DISPLAY_LENGTH:
                 preset = preset[:21] + "..."
             self.settings_summary_lbl.config(
                 text=f"{model}  ·  {preset}"
@@ -812,7 +1025,7 @@ class FloatingOptimizerApp:
         try:
             save_config(self.cfg)
         except OSError as error:
-            self.status_var.set(f"❌ Could not save settings: {error}")
+            self.status_var.set(f"Could not save settings: {error}")
             return False
         return True
 
@@ -1076,7 +1289,7 @@ class FloatingOptimizerApp:
         snippet_name = self.snippet_var.get()
         snippet = self.cfg.get("snippets", {}).get(snippet_name)
         if not snippet:
-            self.status_var.set("⚠️ Choose a saved snippet first.")
+            self.status_var.set("Choose a saved snippet first.")
             return
         current = self.input_text.get("1.0", tk.END).strip()
         addition = f"[{snippet_name}]\n{snippet}"
@@ -1091,7 +1304,7 @@ class FloatingOptimizerApp:
     def pipe_output_to_input(self):
         output = self.output_text.get("1.0", tk.END).strip()
         if not output:
-            self.status_var.set("⚠️ There is no output to send to the prompt input.")
+            self.status_var.set("There is no output to send to the prompt input.")
             return
         self.input_text.delete("1.0", tk.END)
         self.input_text.insert("1.0", output)
@@ -1176,6 +1389,7 @@ class FloatingOptimizerApp:
     def open_bridge_dialog(self):
         win = tk.Toplevel(self.root)
         win.title("Reasoning -> Goose Bridge")
+        win.iconphoto(True, self._icon_32)
         win.configure(bg=BG0)
         win.geometry("480x600")
         win.minsize(400, 480)
@@ -1213,7 +1427,7 @@ class FloatingOptimizerApp:
         in_box.pack(fill=tk.X, padx=10)
 
         distill_btn = tk.Button(
-            win, text="⚙  DISTILL TO EXECUTION STEPS", bg=RED, fg="#0a0a0a",
+            win, text="DISTILL TO EXECUTION STEPS", bg=RED, fg="#0a0a0a",
             activebackground=RED_HOVER, activeforeground="#0a0a0a",
             font=("Segoe UI", 9, "bold"), bd=0, pady=7, cursor="hand2",
         )
@@ -1241,9 +1455,9 @@ class FloatingOptimizerApp:
         def run_distill():
             reasoning = in_box.get("1.0", tk.END).strip()
             if not reasoning:
-                status_var.set("⚠️ Paste some reasoning text first.")
+                status_var.set("Paste some reasoning text first.")
                 return
-            distill_btn.config(state=tk.DISABLED, text="⏳  DISTILLING...")
+            distill_btn.config(state=tk.DISABLED, text="DISTILLING...")
             status_var.set(f"Distilling with {bridge_model_var.get()}...")
             threading.Thread(target=_worker, args=(reasoning, bridge_model_var.get()), daemon=True).start()
 
@@ -1270,14 +1484,14 @@ class FloatingOptimizerApp:
                 self.root.after(0, _on_done, "", str(e), None)
 
         def _on_done(result, error, state_file):
-            distill_btn.config(state=tk.NORMAL, text="⚙  DISTILL TO EXECUTION STEPS")
+            distill_btn.config(state=tk.NORMAL, text="DISTILL TO EXECUTION STEPS")
             if error:
-                status_var.set(f"❌ Error: {error}")
+                status_var.set(f"Error: {error}")
                 return
             out_box.delete("1.0", tk.END)
             out_box.insert(tk.END, result)
             state_status = f" using {state_file}" if state_file else " (zero-shot)"
-            status_var.set(f"✅ Distilled{state_status}. Ready to copy or send to Goose.")
+            status_var.set(f"Distilled{state_status}. Ready to copy or send to Goose.")
 
         distill_btn.config(command=run_distill)
 
@@ -1406,11 +1620,11 @@ class FloatingOptimizerApp:
 
     def _on_models_loaded(self, models, error):
         if error:
-            self.status_dot.itemconfig(self._dot_id, fill=RED)
-            self.status_var.set(f"❌ Ollama unreachable: {error}")
+            self.status_indicator.set_status_color(RED)
+            self.status_var.set(f"Ollama unreachable: {error}")
             return
 
-        self.status_dot.itemconfig(self._dot_id, fill=GREEN_OK)
+        self.status_indicator.set_status_color(GREEN_OK)
         if models:
             self.model_dropdown["values"] = models
             if self.model_var.get() not in models:
@@ -1425,14 +1639,15 @@ class FloatingOptimizerApp:
     def start_optimization(self):
         rough = self.input_text.get("1.0", tk.END).strip()
         if not rough:
-            self.status_var.set("⚠️ Please enter a rough prompt first.")
+            self.status_var.set("Please enter a rough prompt first.")
             return
 
         model_name = self.model_var.get()
         preset_name = self.preset_var.get()
         preset_rules = self.presets.get(preset_name, PRESETS["General Prompt"])
 
-        self.opt_btn.config(state=tk.DISABLED, text="⏳  OPTIMIZING...")
+        self.opt_btn.config(state=tk.DISABLED, text="OPTIMIZING...")
+        self.status_indicator.start()
         self.status_var.set(f"Optimizing with {model_name} ({preset_name})...")
 
         thread = threading.Thread(
@@ -1458,23 +1673,43 @@ class FloatingOptimizerApp:
             cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL).strip()
 
             self.root.after(
-                0, self._on_optimization_complete, cleaned, None, rough, model_name, preset_name, state_file
+                0,
+                lambda: self._on_optimization_complete(
+                    cleaned,
+                    None,
+                    rough=rough,
+                    model_name=model_name,
+                    preset_name=preset_name,
+                    state_file=state_file,
+                ),
             )
         except Exception as e:
+            error = str(e)
             self.root.after(
-                0, self._on_optimization_complete, "", str(e), rough, model_name, preset_name, None
+                0,
+                lambda: self._on_optimization_complete(
+                    "",
+                    error,
+                    rough=rough,
+                    model_name=model_name,
+                    preset_name=preset_name,
+                    state_file=None,
+                ),
             )
 
-    def _on_optimization_complete(self, result_text, error, rough, model_name, preset_name, state_file):
+    def _on_optimization_complete(
+        self, result_text, error, *, rough, model_name, preset_name, state_file
+    ):
+        self.status_indicator.stop()
         self.opt_btn.config(state=tk.NORMAL, text="OPTIMIZE PROMPT")
         if error:
-            self.status_var.set(f"❌ Error: {error}")
+            self.status_var.set(f"Error: {error}")
             return
 
         self.output_text.delete("1.0", tk.END)
         self.output_text.insert(tk.END, result_text)
         state_status = f"Compiled state: {state_file}" if state_file else "Zero-shot (no compiled state found)."
-        self.status_var.set(f"✅ Optimization complete. {state_status}")
+        self.status_var.set(f"Optimization complete. {state_status}")
         self._push_history(rough, result_text, model_name, preset_name)
 
     # ------------------------------------------------------------------ #
@@ -1491,7 +1726,7 @@ class FloatingOptimizerApp:
             target_btn._orig_text = original_text
             target_btn._hover_locked = True
             target_btn.config(
-                text="✔ Copied!",
+                text="Copied!",
                 bg=GREEN_OK,
                 fg=BG0,
                 highlightbackground=GREEN_OK,
@@ -1540,12 +1775,12 @@ class FloatingOptimizerApp:
         self._copy_text(text)
         goose_path = shutil.which("goose")
         if not goose_path:
-            self.status_var.set("❌ Goose CLI not found on PATH. Prompt copied to clipboard.")
+            self.status_var.set("Goose CLI not found on PATH. Prompt copied to clipboard.")
             return
 
         project_path = Path(self.project_path_var.get()).expanduser()
         if not project_path.is_dir():
-            self.status_var.set(f"❌ Project folder does not exist: {project_path}")
+            self.status_var.set(f"Project folder does not exist: {project_path}")
             return
 
         try:
@@ -1564,7 +1799,7 @@ class FloatingOptimizerApp:
                 f"Goose CLI started in {project_path}. Prompt copied; paste it into the session."
             )
         except OSError as e:
-            self.status_var.set(f"❌ Failed to launch Goose: {e}")
+            self.status_var.set(f"Failed to launch Goose: {e}")
 
     def send_to_goose_gui(self):
         text = self.output_text.get("1.0", tk.END).strip()
@@ -1578,7 +1813,7 @@ class FloatingOptimizerApp:
             os.startfile(r"shell:AppsFolder\electron.app.Goose")
             self._flash_status("Opened Goose GUI. Prompt copied to clipboard; paste it into the app.")
         except OSError as e:
-            self.status_var.set(f"❌ Failed to open Goose GUI: {e}")
+            self.status_var.set(f"Failed to open Goose GUI: {e}")
 
     def send_to_ollama(self):
         text = self.output_text.get("1.0", tk.END).strip()
@@ -1592,7 +1827,7 @@ class FloatingOptimizerApp:
             )
             self._flash_status(f"Launched Ollama ({model}) in a new terminal!")
         except Exception as e:
-            self.status_var.set(f"❌ Failed to launch Ollama: {e}")
+            self.status_var.set(f"Failed to launch Ollama: {e}")
 
     def _flash_status(self, msg):
         self.status_var.set(msg)
@@ -1632,5 +1867,5 @@ if __name__ == "__main__":
     except (OSError, ValueError) as error:
         messagebox.showerror("Could not load settings", str(error), parent=root)
         root.destroy()
-        raise SystemExit(1)
+        raise SystemExit(1) from error
     root.mainloop()

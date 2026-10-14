@@ -1,5 +1,6 @@
-import sys
 import subprocess
+import sys
+
 import dspy
 
 # 1. Connect to Ollama
@@ -41,12 +42,12 @@ def copy_to_clipboard(text: str):
         text=True,
         check=True
     )
-    print("\n[✔] Copied optimized prompt to Windows clipboard!")
+    print("\n[Copied] Optimized prompt to Windows clipboard!")
 
 
 def send_to_goose(prompt: str):
     """Launches Goose CLI with the optimized prompt."""
-    print(f"\n[*] Dispatching to Goose...")
+    print("\n[*] Dispatching to Goose...")
     try:
         subprocess.run(["goose", "run", "--text", prompt], check=True)
     except FileNotFoundError:
